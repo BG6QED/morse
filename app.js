@@ -1274,7 +1274,7 @@ const UI = (() => {
         scale.innerHTML = '';
         const band = Constants.BANDS[State.get('currentBandIndex')];
         const range = band.max - band.min;
-        const stepSize = Math.max(0.005, range / 20);
+        const stepSize = 0.001;
         const totalWidth = canvas.offsetWidth;
         DOM.updateStyle('frequencyScale', 'width', `${totalWidth}px`);
         for (let freq = band.min; freq <= band.max; freq += stepSize) {
