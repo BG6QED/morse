@@ -1868,10 +1868,12 @@ const UI = (() => {
                 wpmValue.textContent = String(val);
             });
         }
-        const paddleLeft = document.getElementById('paddleLeft');
+                const paddleLeft = document.getElementById('paddleLeft');
         const paddleRight = document.getElementById('paddleRight');
         const paddleArea = document.getElementById('paddleArea');
         if (paddleLeft && paddleRight && paddleArea) {
+            let leftPressed = false;
+            let rightPressed = false;
             const setVisual = (leftOn, rightOn) => {
                 if (leftOn) paddleLeft.classList.add('active'); else paddleLeft.classList.remove('active');
                 if (rightOn) paddleRight.classList.add('active'); else paddleRight.classList.remove('active');
@@ -1908,40 +1910,46 @@ const UI = (() => {
                 paddleLeft.addEventListener('touchstart', (e) => {
                     if (State.get('isManualMode')) return;
                     e.preventDefault();
+                    leftPressed = true;
                     Keyer.setPaddle('dot', true);
-                    setVisual(true, false);
+                    setVisual(leftPressed, rightPressed);
                 }, { passive: false });
                 paddleLeft.addEventListener('touchend', (e) => {
                     if (State.get('isManualMode')) return;
                     e.preventDefault();
+                    leftPressed = false;
                     Keyer.setPaddle('dot', false);
-                    setVisual(false, false);
+                    setVisual(leftPressed, rightPressed);
                 }, { passive: false });
                 paddleLeft.addEventListener('touchcancel', (e) => {
                     if (State.get('isManualMode')) return;
                     e.preventDefault();
+                    leftPressed = false;
                     Keyer.setPaddle('dot', false);
-                    setVisual(false, false);
+                    setVisual(leftPressed, rightPressed);
                 }, { passive: false });
             }
             if (paddleRight) {
                 paddleRight.addEventListener('touchstart', (e) => {
                     if (State.get('isManualMode')) return;
                     e.preventDefault();
+                    rightPressed = true;
                     Keyer.setPaddle('dash', true);
-                    setVisual(false, true);
+                    setVisual(leftPressed, rightPressed);
                 }, { passive: false });
                 paddleRight.addEventListener('touchend', (e) => {
                     if (State.get('isManualMode')) return;
                     e.preventDefault();
+                    rightPressed = false;
                     Keyer.setPaddle('dash', false);
-                    setVisual(false, false);
+                    setVisual(leftPressed, rightPressed);
                 }, { passive: false });
                 paddleRight.addEventListener('touchcancel', (e) => {
                     if (State.get('isManualMode')) return;
                     e.preventDefault();
+                    rightPressed = false;
                     Keyer.setPaddle('dash', false);
-                    setVisual(false, false);
+                    setVisual(leftPressed, rightPressed);
                 }, { passive: false });
             }
         }
