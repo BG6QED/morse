@@ -119,15 +119,14 @@ const State = (() => {
             lastSyncTime: 0,
             confidence: 0,
             lastValidTime: null
-        }
+        },
+        isLongPressBlocked: false
     };
-
     function initSignalHistory() {
         Constants.BANDS.forEach(band => {
             state.signalHistory[band.name] = {};
         });
     }
-
     return {
         init: initSignalHistory,
         get: (key) => state[key],
@@ -136,10 +135,9 @@ const State = (() => {
         getAll: () => ({ ...state })
     };
 })();
-
 const DOM = (() => {
     const elements = {};
-  
+ 
     const elementIds = [
         'bandSelect', 'frequencyDigits', 'frequencyScale', 'waterfallCanvas',
         'frequencyKnob', 'volumeKnob', 'toneKnob', 'muteButton', 'morseKey',
@@ -150,11 +148,10 @@ const DOM = (() => {
         'modeToggle', 'wpmSlider', 'wpmGroup', 'modeLabel', 'wpmValue',
         'paddleKeyer'
     ];
-  
+ 
     elementIds.forEach(id => {
         elements[id] = document.getElementById(id);
     });
-
     return {
         get: (id) => elements[id],
         updateText: (id, text) => { if (elements[id]) elements[id].textContent = text; },
@@ -166,33 +163,32 @@ const DOM = (() => {
         }
     };
 })();
-
 const Audio = (() => {
     function init() {
         if (State.get('audioContext')) return true;
-
+ 
         try {
             window.AudioContext = window.AudioContext || window.webkitAudioContext;
             const audioContext = new AudioContext();
-
+     
             const masterGain = audioContext.createGain();
             masterGain.gain.value = State.get('isMuted') ? 0 : 1;
             masterGain.connect(audioContext.destination);
-
+     
             const gainNode = audioContext.createGain();
             gainNode.connect(masterGain);
-
+     
             const oscillator = audioContext.createOscillator();
             oscillator.type = 'sine';
             oscillator.frequency.value = State.get('toneFrequency');
             oscillator.connect(gainNode);
             oscillator.start();
             gainNode.gain.value = 0;
-
+     
             State.update({ audioContext, masterGain, gainNode, oscillator });
             return true;
         } catch (error) {
-            DOM.get('connectionStatus').innerHTML += ' <span class="audio-error">音频初始化失败</span>';
+            DOM.get('connectionStatus').innerHTML += ' <span class="audio-error">⚠️ 音频初始化失败</span>';
             return false;
         }
     }
@@ -207,8 +203,15 @@ const Audio = (() => {
     }
     async function startTransmitting() {
         const state = State.getAll();
-        if (state.isTransmitting || state.isMuted || state.isSearching) return false;
+        if (state.isTransmitting || state.isMuted || state.isSearching || state.isLongPressBlocked) return false;
+        if (!await ensureContext()) {
+            DOM.toggleClass('audioActivationPrompt', 'hidden', false);
+            return false;
+        }
         State.set('transmitStartTime', Date.now());
+        const { audioContext, gainNode } = State.getAll();
+        const attackTime = 0.01;
+        gainNode.gain.linearRampToValueAtTime(State.get('volume'), audioContext.currentTime + attackTime);
         State.update({ isTransmitting: true });
         DOM.toggleClass('morseKey', 'key-press', true);
         const waterfall = State.get('waterfallChart');
@@ -223,18 +226,10 @@ const Audio = (() => {
             }, Constants.SCROLL_DELAY);
             State.set('transmitInterval', interval);
         }
-        const ensured = await ensureContext();
-        if (!ensured) {
-            stopTransmitting();
-            return false;
-        }
-        const { audioContext, gainNode } = State.getAll();
-        const attackTime = 0.01;
-        gainNode.gain.linearRampToValueAtTime(State.get('volume'), audioContext.currentTime + attackTime);
         const maxDurationTimer = setTimeout(() => {
             if (State.get('isTransmitting')) {
                 stopTransmitting(true);
-                startTransmitting();
+                State.set('isLongPressBlocked', true);
             }
         }, 1000);
         State.set('maxDurationTimer', maxDurationTimer);
@@ -269,6 +264,8 @@ const Audio = (() => {
         }
         if (isTimeout) {
             showReminder();
+        } else {
+            State.set('isLongPressBlocked', false);
         }
     }
     function showReminder() {
@@ -1658,19 +1655,19 @@ const UI = (() => {
         if (canvas) {
             canvas.addEventListener('click', (e) => {
                 if (State.get('isSearching') || State.get('isTransmitting')) return;
-         
+        
                 const rect = canvas.getBoundingClientRect();
                 const clickX = e.clientX - rect.left;
                 const percentage = clickX / rect.width;
-         
+        
                 const band = Constants.BANDS[State.get('currentBandIndex')];
                 const range = band.max - band.min;
                 const visibleRange = State.get('waterfallChart')?.visibleRange || { start: 0, end: 1 };
                 const visibleWidth = visibleRange.end - visibleRange.start;
                 const adjustedPercentage = visibleRange.start + (percentage * visibleWidth);
-         
+        
                 const newFrequency = parseFloat((band.min + (adjustedPercentage * range)).toFixed(3));
-         
+        
                 State.set('currentFrequency', newFrequency);
                 updateFrequencyDisplay();
                 updateFrequencyIndicatorPosition();
@@ -1703,10 +1700,11 @@ const UI = (() => {
                     Keyer.setPaddle('dash', true);
                 }
             });
-     
+    
             morseKey.addEventListener('mouseup', (e) => {
                 if (State.get('isManualMode')) {
                     if (State.get('isTransmitting')) Audio.stopTransmitting();
+                    State.set('isLongPressBlocked', false); 
                     return;
                 }
                 if (e.button === 0) {
@@ -1715,7 +1713,7 @@ const UI = (() => {
                     Keyer.setPaddle('dash', false);
                 }
             });
-     
+    
             morseKey.addEventListener('mouseleave', () => {
                 if (State.get('isTransmitting')) {
                     Audio.stopTransmitting();
@@ -1730,16 +1728,17 @@ const UI = (() => {
                     Keyer.setPaddle('dot', true);
                 }
             }, { passive: false });
-      
+     
             morseKey.addEventListener('touchend', (e) => {
                 e.preventDefault();
                 if (State.get('isManualMode')) {
                     if (State.get('isTransmitting')) Audio.stopTransmitting();
+                    State.set('isLongPressBlocked', false);
                 } else {
                     Keyer.setPaddle('dot', false);
                 }
             }, { passive: false });
-      
+     
             morseKey.addEventListener('touchcancel', (e) => {
                 e.preventDefault();
                 if (State.get('isTransmitting')) {
@@ -1768,7 +1767,7 @@ const UI = (() => {
                     Keyer.setPaddle('dash', true);
                 }
             }
-     
+    
             if (e.code === 'KeyT' && Constants.BANDS[State.get('currentBandIndex')].name === Constants.TIME_BROADCAST_BAND && !State.get('isTransmitting')) {
                 e.preventDefault();
                 State.set('currentFrequency', Constants.TIME_BROADCAST_FREQUENCY);
@@ -1776,7 +1775,7 @@ const UI = (() => {
                 updateFrequencyIndicatorPosition();
                 resetFrequencyKnobRotation();
             }
-     
+    
             if (e.code === 'KeyA') {
                 e.preventDefault();
                 Audio.playTestTone();
@@ -1787,6 +1786,7 @@ const UI = (() => {
             if (e.code === 'Space' && State.get('isManualMode')) {
                 e.preventDefault();
                 if (State.get('isTransmitting')) Audio.stopTransmitting();
+                State.set('isLongPressBlocked', false);
             }
             if (!State.get('isManualMode')) {
                 if (e.key === ',') {
@@ -1829,15 +1829,15 @@ const UI = (() => {
  
         window.addEventListener('beforeunload', () => {
             Network.cleanupConnections();
-      
+     
             const scrollInterval = State.get('scrollInterval');
             if (scrollInterval) clearInterval(scrollInterval);
-       
+      
             const transmitInterval = State.get('transmitInterval');
             if (transmitInterval) clearInterval(transmitInterval);
-      
+     
             Audio.stopTransmitting();
-      
+     
             const signals = State.get('activeRemoteSignals');
             Object.keys(signals).forEach(id => {
                 if (signals[id].renderInterval) clearInterval(signals[id].renderInterval);
@@ -1962,7 +1962,9 @@ function init() {
     Keyer.init();
  
     Waterfall.init();
-
+ 
+    Audio.init();
+ 
     Network.connectToBand(State.get('currentBandIndex'));
  
     setInterval(SignalProcessor.cleanupAndCheckTimeouts, 1000);
