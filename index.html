@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>网络摩尔斯电码通联</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="radio-container">
+        <!-- 电台标题 -->
+        <div class="radio-header">
+            <h1>网络摩尔斯电码通联</h1>
+            <div id="connectionStatus" class="status-disconnected">
+                <i class="fa fa-circle"></i> 未连接
+            </div>
+        </div>
+        
+        <!-- 主显示区域 -->
+        <div class="main-display">
+            <!-- 频谱瀑布图 -->
+            <div class="waterfall-container">
+                <div class="waterfall-markers"></div> <!-- 频谱上的频率标记 -->
+                <canvas id="waterfallCanvas"></canvas>
+                <div id="frequencyIndicator" class="frequency-indicator"></div> <!-- 中心频率红线 -->
+                <div id="frequencyScale" class="frequency-scale"></div>
+            </div>
+            
+            <!-- 频率显示 -->
+            <div class="frequency-display">
+                <div id="frequencyDigits">07.015 MHz</div>
+            </div>
+        </div>
+        
+        <!-- 控制面板 -->
+        <div class="control-panel">
+            <!-- 左侧控制区 -->
+            <div class="control-section left-controls">
+                <!-- 波段选择 -->
+                <div class="control-group">
+                    <label class="control-label">波段选择</label>
+                    <select id="bandSelect" class="band-select"></select>
+                </div>
+                
+                <!-- 音量和音调控制 - 并排显示 -->
+                <div class="knob-controls-row">
+                    <!-- 音调控制 -->
+                    <div class="control-group knob-control">
+                        <label class="control-label">音调 <span id="toneValue">800 Hz</span></label>
+                        <div class="knob-container medium-knob">
+                            <div id="toneKnob" class="knob">
+                                <div class="knob-marker"></div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 音量控制 -->
+                    <div class="control-group knob-control">
+                        <label class="control-label">音量 <span id="volumeValue">70%</span></label>
+                        <div class="knob-container medium-knob">
+                            <div id="volumeKnob" class="knob">
+                                <div class="knob-marker"></div>
+                            </div>
+                        </div>
+                        <!-- 静音按钮 -->
+                        <button id="muteButton" class="radio-button mute-button">
+                            <i class="fa fa-volume-up mr-1"></i>静音
+                        </button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 中间控制区 - 发报键 -->
+            <div class="control-section key-control">
+                <label class="control-label">发报键</label>
+                <div id="morseKey" class="morse-key">
+                    <div class="key-top"></div>
+                </div>
+                <div id="paddleKeyer" class="paddle-keyer hidden">
+                    <div id="paddleArea" class="paddles">
+                        <div id="paddleLeft" class="paddle half left"></div>
+                        <div id="paddleRight" class="paddle half right"></div>
+                    </div>
+                </div>
+                <div id="keyHintManual" class="key-hint">
+                    <i class="fa fa-keyboard-o"></i> 空格键控制发送
+                </div>
+                <div id="keyHintAuto" class="key-hint hidden">
+                    <i class="fa fa-keyboard-o"></i> 逗号","=点，句号"."=划；鼠标左键=点，右键=划
+                </div>
+            </div>
+            
+            <!-- 右侧控制区 -->
+            <div class="control-section right-controls">
+                <!-- 频率控制 - 调大尺寸 -->
+                <div class="control-group knob-control">
+                    <label class="control-label">频率调节</label>
+                    <div class="knob-container large-knob">
+                        <div id="frequencyKnob" class="knob">
+                            <div class="knob-marker"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 功能按钮 -->
+                <div class="control-group button-group">
+                    <button id="searchButton" class="radio-button search-button">
+                        <i class="fa fa-search mr-1"></i>搜索信号
+                    </button>
+                    <div class="control-group">
+                        <label class="control-label">模式</label>
+                        <div class="toggle-row">
+                            <label class="switch">
+                                <input id="modeToggle" type="checkbox" />
+                                <span class="slider round"></span>
+                            </label>
+                            <span id="modeLabel">手动</span>
+                        </div>
+                    </div>
+                    <div id="wpmGroup" class="control-group hidden">
+                        <label class="control-label">WPM（拍发速度） <span id="wpmValue">20</span></label>
+                        <input id="wpmSlider" type="range" min="5" max="40" value="20" step="1" class="wpm-slider" />
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 搜索模态框 -->
+        <div id="searchModal" class="modal">
+            <div class="modal-content">
+                <h3>正在搜索信号...</h3>
+                <div class="progress-bar">
+                    <div id="searchProgress" class="progress-fill"></div>
+                </div>
+                <p id="searchStatus">正在初始化搜索...</p>
+                <p id="noSignalMessage" class="hidden">未找到任何信号</p>
+            </div>
+        </div>
+
+    <script src="app.js"></script>
+</body>
+<footer class="footer" style="text-align: center;">
+  <a href="https://cw.ham.moe/" target="_blank">摩尔斯码学习工具</a>
+</footer>
+</html>
