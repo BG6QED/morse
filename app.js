@@ -170,26 +170,25 @@ const DOM = (() => {
 const Audio = (() => {
     function init() {
         if (State.get('audioContext')) return true;
-    
+
         try {
             window.AudioContext = window.AudioContext || window.webkitAudioContext;
             const audioContext = new AudioContext();
-        
+
             const masterGain = audioContext.createGain();
             masterGain.gain.value = State.get('isMuted') ? 0 : 1;
             masterGain.connect(audioContext.destination);
-        
+
             const gainNode = audioContext.createGain();
             gainNode.connect(masterGain);
-        
-            // 创建持久振荡器，始终运行，初始 gain=0
+
             const oscillator = audioContext.createOscillator();
             oscillator.type = 'sine';
             oscillator.frequency.value = State.get('toneFrequency');
             oscillator.connect(gainNode);
             oscillator.start();
-            gainNode.gain.value = 0; // 初始静音
-        
+            gainNode.gain.value = 0;
+
             State.update({ audioContext, masterGain, gainNode, oscillator });
             return true;
         } catch (error) {
@@ -209,15 +208,8 @@ const Audio = (() => {
     async function startTransmitting() {
         const state = State.getAll();
         if (state.isTransmitting || state.isMuted || state.isSearching) return false;
-        if (!await ensureContext()) {
-            DOM.toggleClass('audioActivationPrompt', 'hidden', false);
-            return false;
-        }
+        // 同步设状态，开始绘制和发送
         State.set('transmitStartTime', Date.now());
-        const { audioContext, gainNode } = State.getAll();
-        // 添加 Attack 阶段（10ms 内从 0 增加到目标音量）
-        const attackTime = 0.01; // 10ms
-        gainNode.gain.linearRampToValueAtTime(State.get('volume'), audioContext.currentTime + attackTime);
         State.update({ isTransmitting: true });
         DOM.toggleClass('morseKey', 'key-press', true);
         const waterfall = State.get('waterfallChart');
@@ -232,9 +224,25 @@ const Audio = (() => {
             }, Constants.SCROLL_DELAY);
             State.set('transmitInterval', interval);
         }
+        // 异步 ensure 和 ramp
+        const ensured = await ensureContext();
+        if (!ensured) {
+            stopTransmitting(); // 失败，立即 stop
+            return false;
+        }
+        const { audioContext, gainNode } = State.getAll();
+        const attackTime = 0.01;
+        gainNode.gain.linearRampToValueAtTime(State.get('volume'), audioContext.currentTime + attackTime);
+        const maxDurationTimer = setTimeout(() => {
+            if (State.get('isTransmitting')) {
+                stopTransmitting(true);
+                startTransmitting();
+            }
+        }, 1000);
+        State.set('maxDurationTimer', maxDurationTimer);
         return true;
     }
-    function stopTransmitting() {
+    function stopTransmitting(isTimeout = false) {
         if (!State.get('isTransmitting')) return;
         const interval = State.get('transmitInterval');
         if (interval) {
@@ -244,7 +252,7 @@ const Audio = (() => {
         const gainNode = State.get('gainNode');
         const audioContext = State.get('audioContext');
         if (gainNode && audioContext) {
-            const releaseTime = 0.01; // 10ms
+            const releaseTime = 0.01;
             gainNode.gain.linearRampToValueAtTime(0, audioContext.currentTime + releaseTime);
         }
         State.set('isTransmitting', false);
@@ -256,6 +264,39 @@ const Audio = (() => {
         }
         Network.sendSignal();
         State.set('transmitStartTime', null);
+        const maxTimer = State.get('maxDurationTimer');
+        if (maxTimer) {
+            clearTimeout(maxTimer);
+            State.set('maxDurationTimer', null);
+        }
+        if (isTimeout) {
+            showReminder();
+        }
+    }
+    function showReminder() {
+        let reminder = document.getElementById('reminder');
+        if (!reminder) {
+            reminder = document.createElement('div');
+            reminder.id = 'reminder';
+            reminder.style.position = 'absolute';
+            reminder.style.top = '50%';
+            reminder.style.left = '50%';
+            reminder.style.transform = 'translate(-50%, -50%)';
+            reminder.style.backgroundColor = 'rgba(255, 0, 0, 0.7)';
+            reminder.style.color = 'white';
+            reminder.style.padding = '10px';
+            reminder.style.borderRadius = '5px';
+            reminder.style.zIndex = '1000';
+            reminder.style.fontSize = '14px';
+            reminder.style.pointerEvents = 'none';
+            const canvasContainer = document.querySelector('.waterfall-container') || document.body;
+            canvasContainer.appendChild(reminder);
+        }
+        reminder.textContent = '请勿持续按压超过1秒';
+        reminder.style.display = 'block';
+        setTimeout(() => {
+            reminder.style.display = 'none';
+        }, 3000);
     }
     async function playReceivedTone(signalId) {
         if (!await ensureContext()) {
@@ -271,14 +312,14 @@ const Audio = (() => {
         oscillator.type = 'sine';
         oscillator.frequency.setValueAtTime(toneFrequency + toneOffset, audioContext.currentTime);
         const gain = audioContext.createGain();
-        const attackTime = 0.01; // 10ms
+        const attackTime = 0.01;
         gain.gain.setValueAtTime(0, audioContext.currentTime);
         gain.gain.linearRampToValueAtTime(State.get('volume') * 0.7, audioContext.currentTime + attackTime);
         gain.connect(masterGain);
         oscillator.connect(gain);
         oscillator.start();
         signals[signalId].oscillator = oscillator;
-        signals[signalId].gainNode = gain; // 保存 gainNode 以便在停止时使用
+        signals[signalId].gainNode = gain;
         State.set('activeRemoteSignals', signals);
     }
     function stopReceivedTone(signalId) {
@@ -287,7 +328,7 @@ const Audio = (() => {
         const oscillator = signals[signalId].oscillator;
         const gain = signals[signalId].gainNode;
         if (oscillator && gain) {
-            const releaseTime = 0.01; // 10ms
+            const releaseTime = 0.01;
             gain.gain.setValueAtTime(gain.gain.value, State.get('audioContext').currentTime);
             gain.gain.linearRampToValueAtTime(0, State.get('audioContext').currentTime + releaseTime);
             setTimeout(() => {
@@ -311,8 +352,8 @@ const Audio = (() => {
         oscillator.type = 'sine';
         oscillator.frequency.setValueAtTime(toneFrequency + 200, audioContext.currentTime);
         const gain = audioContext.createGain();
-        const attackTime = 0.01; // 10ms
-        const releaseTime = 0.01; // 10ms
+        const attackTime = 0.01;
+        const releaseTime = 0.01;
         const duration = (type === 'dot' ? Constants.DOT_DURATION : Constants.DASH_DURATION) / 1000;
         gain.gain.setValueAtTime(0, audioContext.currentTime);
         gain.gain.linearRampToValueAtTime(State.get('volume') * 0.8, audioContext.currentTime + attackTime);
@@ -333,9 +374,9 @@ const Audio = (() => {
         const gain = audioContext.createGain();
         oscillator.type = 'sine';
         oscillator.frequency.setValueAtTime(1000, audioContext.currentTime);
-        const attackTime = 0.01; // 10ms
-        const releaseTime = 0.01; // 10ms
-        const duration = 0.5; // 500ms
+        const attackTime = 0.01;
+        const releaseTime = 0.01;
+        const duration = 0.5;
         gain.gain.setValueAtTime(0, audioContext.currentTime);
         gain.gain.linearRampToValueAtTime(0.3, audioContext.currentTime + attackTime);
         gain.gain.setValueAtTime(0.3, audioContext.currentTime + attackTime);
@@ -1419,7 +1460,7 @@ const UI = (() => {
             if (State.get('isTransmitting')) {
                 gainNode.gain.linearRampToValueAtTime(volume, audioContext.currentTime + 0.01);
             } else {
-                gainNode.gain.value = 0; // 非传输时保持0
+                gainNode.gain.value = 0;
             }
         }
         updateVolumeDisplay();
@@ -1456,6 +1497,7 @@ const UI = (() => {
         State.set('startAngle', currentAngle);
     }
     function setupEventListeners() {
+        document.body.focus();
         const bandSelect = DOM.get('bandSelect');
         if (bandSelect) {
             bandSelect.addEventListener('change', (e) => {
@@ -1524,7 +1566,7 @@ const UI = (() => {
                 State.set('startAngle', startAngle);
             }, { passive: false });
         }
-    
+ 
         const toneKnob = DOM.get('toneKnob');
         if (toneKnob) {
             toneKnob.addEventListener('mousedown', (e) => {
@@ -1534,31 +1576,31 @@ const UI = (() => {
                 const centerY = rect.height / 2;
                 const mouseX = e.clientX - rect.left - centerX;
                 const mouseY = e.clientY - rect.top - centerY;
-            
+         
                 let startAngle = Math.atan2(mouseY, mouseX) * (180 / Math.PI);
                 startAngle = (startAngle + 360) % 360;
                 startAngle = (startAngle + 90) % 360;
                 State.set('startAngle', startAngle);
             });
-         
+      
             toneKnob.addEventListener('touchstart', (e) => {
                 if (e.touches.length !== 1) return;
                 e.preventDefault();
-             
+          
                 State.set('isDraggingTone', true);
                 const rect = toneKnob.getBoundingClientRect();
                 const centerX = rect.width / 2;
                 const centerY = rect.height / 2;
                 const touchX = e.touches[0].clientX - rect.left - centerX;
                 const touchY = e.touches[0].clientY - rect.top - centerY;
-             
+          
                 let startAngle = Math.atan2(touchY, touchX) * (180 / Math.PI);
                 startAngle = (startAngle + 360) % 360;
                 startAngle = (startAngle + 90) % 360;
                 State.set('startAngle', startAngle);
             }, { passive: false });
         }
-    
+ 
         document.addEventListener('mousemove', (e) => {
             if (State.get('isDraggingFrequency')) {
                 updateFrequencyFromInput(e);
@@ -1568,7 +1610,7 @@ const UI = (() => {
                 updateToneFromInput(e);
             }
         });
-     
+ 
         document.addEventListener('touchmove', (e) => {
             if (State.get('isDraggingFrequency')) {
                 e.preventDefault();
@@ -1581,7 +1623,7 @@ const UI = (() => {
                 updateToneFromInput(e, true);
             }
         }, { passive: false });
-    
+ 
         document.addEventListener('mouseup', () => {
             State.update({
                 isDraggingFrequency: false,
@@ -1589,7 +1631,7 @@ const UI = (() => {
                 isDraggingTone: false
             });
         });
-     
+ 
         document.addEventListener('touchend', () => {
             State.update({
                 isDraggingFrequency: false,
@@ -1597,7 +1639,7 @@ const UI = (() => {
                 isDraggingTone: false
             });
         });
-     
+ 
         document.addEventListener('touchcancel', () => {
             State.update({
                 isDraggingFrequency: false,
@@ -1605,7 +1647,7 @@ const UI = (() => {
                 isDraggingTone: false
             });
         });
-      
+  
         document.addEventListener('mouseleave', () => {
             State.update({
                 isDraggingFrequency: false,
@@ -1613,41 +1655,41 @@ const UI = (() => {
                 isDraggingTone: false
             });
         });
-     
+ 
         const canvas = DOM.get('waterfallCanvas');
         if (canvas) {
             canvas.addEventListener('click', (e) => {
                 if (State.get('isSearching') || State.get('isTransmitting')) return;
-             
+         
                 const rect = canvas.getBoundingClientRect();
                 const clickX = e.clientX - rect.left;
                 const percentage = clickX / rect.width;
-             
+         
                 const band = Constants.BANDS[State.get('currentBandIndex')];
                 const range = band.max - band.min;
                 const visibleRange = State.get('waterfallChart')?.visibleRange || { start: 0, end: 1 };
                 const visibleWidth = visibleRange.end - visibleRange.start;
                 const adjustedPercentage = visibleRange.start + (percentage * visibleWidth);
-             
+         
                 const newFrequency = parseFloat((band.min + (adjustedPercentage * range)).toFixed(3));
-             
+         
                 State.set('currentFrequency', newFrequency);
                 updateFrequencyDisplay();
                 updateFrequencyIndicatorPosition();
                 resetFrequencyKnobRotation();
             });
         }
-     
+ 
         const muteBtn = DOM.get('muteButton');
         if (muteBtn) {
             muteBtn.addEventListener('click', Audio.toggleMute);
         }
-     
+ 
         const testBtn = DOM.get('testAudioButton');
         if (testBtn) {
             testBtn.addEventListener('click', Audio.playTestTone);
         }
-     
+ 
         const morseKey = DOM.get('morseKey');
         if (morseKey) {
             morseKey.addEventListener('contextmenu', (e) => { e.preventDefault(); });
@@ -1663,7 +1705,7 @@ const UI = (() => {
                     Keyer.setPaddle('dash', true);
                 }
             });
-         
+     
             morseKey.addEventListener('mouseup', (e) => {
                 if (State.get('isManualMode')) {
                     if (State.get('isTransmitting')) Audio.stopTransmitting();
@@ -1675,7 +1717,7 @@ const UI = (() => {
                     Keyer.setPaddle('dash', false);
                 }
             });
-         
+     
             morseKey.addEventListener('mouseleave', () => {
                 if (State.get('isTransmitting')) {
                     Audio.stopTransmitting();
@@ -1690,7 +1732,7 @@ const UI = (() => {
                     Keyer.setPaddle('dot', true);
                 }
             }, { passive: false });
-          
+      
             morseKey.addEventListener('touchend', (e) => {
                 e.preventDefault();
                 if (State.get('isManualMode')) {
@@ -1699,7 +1741,7 @@ const UI = (() => {
                     Keyer.setPaddle('dot', false);
                 }
             }, { passive: false });
-          
+      
             morseKey.addEventListener('touchcancel', (e) => {
                 e.preventDefault();
                 if (State.get('isTransmitting')) {
@@ -1707,7 +1749,7 @@ const UI = (() => {
                 }
             }, { passive: false });
         }
-     
+ 
         document.addEventListener('keydown', (e) => {
             if (e.code === 'Space' && State.get('isManualMode') && !State.get('isMuted') && !State.get('isSearching') && !State.get('isTransmitting')) {
                 e.preventDefault();
@@ -1728,7 +1770,7 @@ const UI = (() => {
                     Keyer.setPaddle('dash', true);
                 }
             }
-         
+     
             if (e.code === 'KeyT' && Constants.BANDS[State.get('currentBandIndex')].name === Constants.TIME_BROADCAST_BAND && !State.get('isTransmitting')) {
                 e.preventDefault();
                 State.set('currentFrequency', Constants.TIME_BROADCAST_FREQUENCY);
@@ -1736,17 +1778,17 @@ const UI = (() => {
                 updateFrequencyIndicatorPosition();
                 resetFrequencyKnobRotation();
             }
-         
+     
             if (e.code === 'KeyA') {
                 e.preventDefault();
                 Audio.playTestTone();
             }
         });
-     
+ 
         document.addEventListener('keyup', (e) => {
-            if (e.code === 'Space' && State.get('isManualMode') && State.get('isTransmitting')) {
+            if (e.code === 'Space' && State.get('isManualMode')) {
                 e.preventDefault();
-                Audio.stopTransmitting();
+                if (State.get('isTransmitting')) Audio.stopTransmitting();
             }
             if (!State.get('isManualMode')) {
                 if (e.key === ',') {
@@ -1764,12 +1806,12 @@ const UI = (() => {
                 }
             }
         });
-     
+ 
         const searchBtn = DOM.get('searchButton');
         if (searchBtn) {
             searchBtn.addEventListener('click', searchForSignals);
         }
-     
+ 
         window.addEventListener('resize', () => {
             const canvas = DOM.get('waterfallCanvas');
             if (canvas) {
@@ -1786,18 +1828,18 @@ const UI = (() => {
                 UI.updateFrequencyIndicatorPosition();
             }
         });
-     
+ 
         window.addEventListener('beforeunload', () => {
             Network.cleanupConnections();
-         
+      
             const scrollInterval = State.get('scrollInterval');
             if (scrollInterval) clearInterval(scrollInterval);
-          
+       
             const transmitInterval = State.get('transmitInterval');
             if (transmitInterval) clearInterval(transmitInterval);
-         
+      
             Audio.stopTransmitting();
-         
+      
             const signals = State.get('activeRemoteSignals');
             Object.keys(signals).forEach(id => {
                 if (signals[id].renderInterval) clearInterval(signals[id].renderInterval);
@@ -1917,17 +1959,18 @@ const UI = (() => {
 })();
 function init() {
     State.init();
-  
+ 
     UI.populateBandSelect();
     UI.setupEventListeners();
     Keyer.init();
-  
+ 
     Waterfall.init();
-  
-    Audio.init();
-  
+ 
+    // 移除Audio.init()；移到首次交互
+    // Audio.init();
+ 
     Network.connectToBand(State.get('currentBandIndex'));
-  
+ 
     setInterval(SignalProcessor.cleanupAndCheckTimeouts, 1000);
 }
 window.addEventListener('load', init);
