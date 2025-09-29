@@ -607,6 +607,19 @@ input:checked + .slider:before {
         width: 100%;
     }
     
+    /* Reorder control sections for small screens */
+    .control-section.key-section {
+        order: 1; /* Morse key and mode toggle at the top */
+    }
+    
+    .control-section.frequency-section {
+        order: 2; /* Frequency knob below morse key */
+    }
+    
+    .control-section.knobs-section {
+        order: 3; /* Volume and tone knobs at the bottom */
+    }
+    
     .knob-controls-row {
         justify-content: space-around;
     }
