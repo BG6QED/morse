@@ -192,7 +192,7 @@ const Audio = (() => {
             State.update({ audioContext, masterGain, gainNode, oscillator });
             return true;
         } catch (error) {
-            DOM.get('connectionStatus').innerHTML += ' <span class="audio-error">⚠️ 音频初始化失败</span>';
+            DOM.get('connectionStatus').innerHTML += ' <span class="audio-error">音频初始化失败</span>';
             return false;
         }
     }
@@ -208,7 +208,6 @@ const Audio = (() => {
     async function startTransmitting() {
         const state = State.getAll();
         if (state.isTransmitting || state.isMuted || state.isSearching) return false;
-        // 同步设状态，开始绘制和发送
         State.set('transmitStartTime', Date.now());
         State.update({ isTransmitting: true });
         DOM.toggleClass('morseKey', 'key-press', true);
@@ -224,10 +223,9 @@ const Audio = (() => {
             }, Constants.SCROLL_DELAY);
             State.set('transmitInterval', interval);
         }
-        // 异步 ensure 和 ramp
         const ensured = await ensureContext();
         if (!ensured) {
-            stopTransmitting(); // 失败，立即 stop
+            stopTransmitting();
             return false;
         }
         const { audioContext, gainNode } = State.getAll();
@@ -1906,7 +1904,6 @@ const UI = (() => {
                     setVisual(false, false);
                 }
             });
-            // Separate touch events for paddles
             if (paddleLeft) {
                 paddleLeft.addEventListener('touchstart', (e) => {
                     if (State.get('isManualMode')) return;
@@ -1965,10 +1962,7 @@ function init() {
     Keyer.init();
  
     Waterfall.init();
- 
-    // 移除Audio.init()；移到首次交互
-    // Audio.init();
- 
+
     Network.connectToBand(State.get('currentBandIndex'));
  
     setInterval(SignalProcessor.cleanupAndCheckTimeouts, 1000);
