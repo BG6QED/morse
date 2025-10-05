@@ -1,3 +1,11 @@
+.modal-content button,
+.modal-content .radio-button {
+    display: block;
+    margin: 24px auto 0 auto;
+    min-width: 120px;
+    max-width: 80%;
+    text-align: center;
+}
 /* 基础样式与变量 */
 :root {
     --radio-bg: #121a29;
@@ -138,7 +146,7 @@ body {
     align-items: flex-end;
     padding: 0 10px;
     color: var(--glow-green);
-    z-index: 6;
+    z-index: 10;
     background-color: rgba(5, 10, 26, 0.8);
     white-space: nowrap;
 }
@@ -531,30 +539,39 @@ input:checked + .slider:before {
     position: fixed;
     top: 0;
     left: 0;
-    width: 100%;
-    height: 100%;
+    width: 100vw;
+    height: 100vh;
     background-color: rgba(0, 0, 0, 0.7);
-    display: none;
-    justify-content: center;
+    display: flex;
     align-items: center;
-    z-index: 100;
-    opacity: 0;
-    transition: opacity 0.3s ease;
+    justify-content: center;
+    opacity: 1;
+    pointer-events: auto;
+    z-index: 9999;
+    padding: 32px 0;
+    box-sizing: border-box;
 }
 
-.modal.show {
-    opacity: 1;
+.modal:not(.show) {
+    display: none !important;
+    opacity: 0;
+    pointer-events: none;
 }
 
 .modal-content {
     background-color: var(--panel-bg);
     border: 2px solid var(--accent-color);
-    border-radius: 6px;
-    padding: 25px;
-    width: 90%;
-    max-width: 400px;
+    border-radius: 10px;
+    padding: 32px 24px 24px 24px;
+    width: 100%;
+    max-width: 420px;
+    min-width: 260px;
     text-align: center;
-    box-shadow: 0 0 20px rgba(200, 169, 81, 0.3);
+    box-shadow: 0 0 24px rgba(200, 169, 81, 0.3);
+    margin: 0 16px;
+    max-height: 90vh;
+    overflow-y: auto;
+    position: relative;
 }
 
 .modal-content h3 {
@@ -562,6 +579,60 @@ input:checked + .slider:before {
     margin-bottom: 20px;
 }
 
+/* 噪声控制滑块样式 */
+.noise-controls {
+    background-color: var(--panel-bg); /* 使用面板统一背景色 */
+    padding: 15px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    margin-top: 20px;
+}
+
+.noise-controls .control-row {
+    display: flex;
+    align-items: center;
+    margin-bottom: 12px;
+    gap: 10px;
+}
+
+.noise-controls label {
+    color: var(--accent-color);
+    font-size: 0.9rem;
+    width: 120px; /* 固定标签宽度 */
+}
+
+.noise-controls input[type="range"] {
+    flex: 1; /* 自适应剩余宽度 */
+    height: 6px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--slider-track);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    outline: none;
+}
+
+.noise-controls input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent-color);
+    cursor: pointer;
+    border: 1px solid var(--knob-border);
+    box-shadow: 0 0 3px rgba(0, 0, 0, 0.3);
+}
+
+.noise-controls input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent-color);
+    cursor: pointer;
+    border: 1px solid var(--knob-border);
+    box-shadow: 0 0 3px rgba(0, 0, 0, 0.3);
+}
 /* 进度条 */
 .progress-bar {
     height: 8px;

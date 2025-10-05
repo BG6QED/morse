@@ -6,13 +6,13 @@ const Constants = {
     TIME_BROADCAST_BAND: '40m',
     TIME_BROADCAST_FREQUENCY: 7.003,
     SIGNAL_TIMEOUT: 3000,
-  
+
     DOT_DURATION: 100,
     DASH_DURATION: 300,
     ELEMENT_GAP: 100,
     CHARACTER_GAP: 300,
     WORD_GAP: 700,
-  
+
     BANDS: [
         { name: "160m", min: 1.800, max: 1.860, code: "160" },
         { name: "80m", min: 3.500, max: 3.525, code: "80" },
@@ -27,12 +27,12 @@ const Constants = {
         { name: "2m", min: 144.000, max: 144.100, code: "2" },
         { name: "70cm", min: 430.000, max: 430.100, code: "70" }
     ],
-  
+
     NETWORK: {
         RECONNECT_BACKOFF: 1000,
         MAX_RECONNECT_DELAY: 30000,
     },
-  
+
     SIGNAL_PROCESSING: {
         FREQUENCY_TOLERANCE: 0.0001,
         TIME_SIGNAL_TOLERANCE: 0.0001,
@@ -42,6 +42,18 @@ const Constants = {
         SIGNAL_MERGE_THRESHOLD: 0.001,
         SIGNAL_CONTINUITY_THRESHOLD: 50,
         SIGNAL_GAP_THRESHOLD: 500
+    },
+
+    NOISE: {
+        QRN_LEVEL: 0.1, // 自然噪声基础水平 (0-1)
+        QRM_LEVEL: 0.2, // 人为干扰基础水平 (0-1)
+        QSB_FREQUENCY: 0.01, // 信号衰落频率 (Hz)
+        QSB_DEPTH: 0.5, // 信号衰落深度 (0-1)
+        QRM_INTERVAL_MIN: 2000, // 最小干扰间隔 (ms)
+        QRM_INTERVAL_MAX: 8000, // 最大干扰间隔 (ms)
+        QRM_DURATION_MIN: 500, // 最小干扰持续时间 (ms)
+        QRM_DURATION_MAX: 3000, // 最大干扰持续时间 (ms)
+        QRM_FREQ_VARIANCE: 0.02 // 干扰频率变化范围 (MHz)
     }
 };
 
@@ -60,6 +72,7 @@ const MorseCodeMap = {
 
 const State = (() => {
     const state = {
+        pendingRelease: false,
         currentBandIndex: 2,
         previousBandIndex: 2,
         previousFrequency: 0,
@@ -82,6 +95,8 @@ const State = (() => {
         oscillator: null,
         gainNode: null,
         masterGain: null,
+        receivedGain: null,
+        qsbGain: null,
         volume: 0.7,
         toneFrequency: 800,
         waterfallChart: null,
@@ -120,7 +135,18 @@ const State = (() => {
             confidence: 0,
             lastValidTime: null
         },
-        isLongPressBlocked: false
+        isLongPressBlocked: false,
+        noiseGenerator: null,
+        noiseGain: null,
+        qrmOscillator: null,
+        qrmGain: null,
+        qrmRFfreq: null,
+        qsbFactor: 1,
+        isQrmActive: false,
+        qrmInterval: null,
+        qsbInterval: null,
+        currentQrmId: null,
+        currentQrmInterval: null
     };
     function initSignalHistory() {
         Constants.BANDS.forEach(band => {
@@ -135,6 +161,7 @@ const State = (() => {
         getAll: () => ({ ...state })
     };
 })();
+
 const DOM = (() => {
     const elements = {};
  
@@ -152,71 +179,92 @@ const DOM = (() => {
     elementIds.forEach(id => {
         elements[id] = document.getElementById(id);
     });
+    elements['reminderModal'] = document.getElementById('reminderModal');
+    elements['rogerButton'] = document.getElementById('rogerButton');
     return {
         get: (id) => elements[id],
         updateText: (id, text) => { if (elements[id]) elements[id].textContent = text; },
         updateStyle: (id, prop, value) => { if (elements[id]) elements[id].style[prop] = value; },
         toggleClass: (id, className, add = true) => {
-            if (elements[id]) {
-                add ? elements[id].classList.add(className) : elements[id].classList.remove(className);
-            }
+            if (elements[id]) elements[id].classList[add ? 'add' : 'remove'](className);
         }
     };
 })();
+
 const Audio = (() => {
+    let contextResumed = false;
     function init() {
         if (State.get('audioContext')) return true;
- 
         try {
-            window.AudioContext = window.AudioContext || window.webkitAudioContext;
-            const audioContext = new AudioContext();
-     
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const masterGain = audioContext.createGain();
-            masterGain.gain.value = State.get('isMuted') ? 0 : 1;
+            masterGain.gain.value = 1;
             masterGain.connect(audioContext.destination);
-     
             const gainNode = audioContext.createGain();
+            gainNode.gain.value = State.get('volume');
             gainNode.connect(masterGain);
-     
-            const oscillator = audioContext.createOscillator();
-            oscillator.type = 'sine';
-            oscillator.frequency.value = State.get('toneFrequency');
-            oscillator.connect(gainNode);
-            oscillator.start();
-            gainNode.gain.value = 0;
-     
-            State.update({ audioContext, masterGain, gainNode, oscillator });
+            const receivedGain = audioContext.createGain();
+            receivedGain.gain.value = State.get('volume');
+            receivedGain.connect(masterGain);
+            State.update({
+                audioContext, masterGain, gainNode, receivedGain, oscillator: null
+            });
+            // 初始化噪声和干扰系统
+            initNoise();
             return true;
-        } catch (error) {
-            DOM.get('connectionStatus').innerHTML += ' <span class="audio-error">⚠️ 音频初始化失败</span>';
-            return false;
-        }
+        } catch (error) { return false; }
     }
     async function ensureContext() {
         if (!State.get('audioContext') && !init()) return false;
         const audioContext = State.get('audioContext');
         if (audioContext.state === 'suspended') {
-            try { await audioContext.resume(); }
-            catch (err) { return false; }
+            try {
+                await audioContext.resume();
+                contextResumed = true;
+            } catch (e) {}
         }
         return true;
     }
+    async function userGestureResume() {
+        if (!contextResumed) {
+            await ensureContext();
+        }
+    }
+    function updateQrmTone() {
+        if (!State.get('isQrmActive') || !State.get('qrmOscillator') || State.get('qrmRFfreq') === null) return;
+        const diff = State.get('qrmRFfreq') - State.get('currentFrequency');
+        const beat = diff * 1000000; // 1 Hz RF diff = 1 Hz audio beat
+        const qrmOsc = State.get('qrmOscillator');
+        qrmOsc.frequency.value = State.get('toneFrequency') + beat;
+    }
     async function startTransmitting() {
+        await userGestureResume();
         const state = State.getAll();
         if (state.isTransmitting || state.isMuted || state.isSearching || state.isLongPressBlocked) return false;
-        if (!await ensureContext()) {
-            DOM.toggleClass('audioActivationPrompt', 'hidden', false);
-            return false;
-        }
+        if (!await ensureContext()) return false;
         State.set('transmitStartTime', Date.now());
-        const { audioContext, gainNode } = State.getAll();
+        const { audioContext, gainNode, toneFrequency } = State.getAll();
+        if (!audioContext || !gainNode) return false;
+        let txOsc = State.get('oscillator');
+        if (!txOsc) {
+            txOsc = audioContext.createOscillator();
+            txOsc.type = 'sine';
+            txOsc.frequency.setValueAtTime(toneFrequency || 800, audioContext.currentTime);
+            txOsc.connect(gainNode);
+            txOsc.start();
+            State.set('oscillator', txOsc);
+        }
         const attackTime = 0.01;
+        gainNode.gain.cancelScheduledValues(audioContext.currentTime);
+        gainNode.gain.setValueAtTime(0, audioContext.currentTime);
         gainNode.gain.linearRampToValueAtTime(State.get('volume'), audioContext.currentTime + attackTime);
         State.update({ isTransmitting: true });
         DOM.toggleClass('morseKey', 'key-press', true);
         const waterfall = State.get('waterfallChart');
-        if (waterfall) waterfall.startSignal(State.get('currentFrequency'), true, false);
-        Network.sendSignal();
+        if (waterfall) {
+            waterfall.startSignal(State.get('currentFrequency'), true, false);
+        }
+        Network.sendSignal(true); // 发送 start 信号
         if (!State.get('transmitInterval')) {
             const interval = setInterval(() => {
                 const waterfall = State.get('waterfallChart');
@@ -236,38 +284,45 @@ const Audio = (() => {
         return true;
     }
     function stopTransmitting(isTimeout = false) {
-        if (!State.get('isTransmitting')) return;
-        const interval = State.get('transmitInterval');
-        if (interval) {
-            clearInterval(interval);
-            State.set('transmitInterval', null);
-        }
-        const gainNode = State.get('gainNode');
-        const audioContext = State.get('audioContext');
-        if (gainNode && audioContext) {
-            const releaseTime = 0.01;
-            gainNode.gain.linearRampToValueAtTime(0, audioContext.currentTime + releaseTime);
-        }
-        State.set('isTransmitting', false);
-        DOM.toggleClass('morseKey', 'key-press', false);
-        const waterfall = State.get('waterfallChart');
-        const start = State.get('transmitStartTime');
-        if (waterfall && start) {
-            waterfall.endSignal(State.get('currentFrequency'), true, false, Date.now() - start);
-        }
-        Network.sendSignal();
-        State.set('transmitStartTime', null);
-        const maxTimer = State.get('maxDurationTimer');
-        if (maxTimer) {
-            clearTimeout(maxTimer);
-            State.set('maxDurationTimer', null);
-        }
-        if (isTimeout) {
-            showReminder();
-        } else {
-            State.set('isLongPressBlocked', false);
-        }
+    const interval = State.get('transmitInterval');
+    if (interval) {
+        clearInterval(interval);
+        State.set('transmitInterval', null);
     }
+    const gainNode = State.get('gainNode');
+    const audioContext = State.get('audioContext');
+    const txOsc = State.get('oscillator');
+    if (txOsc) {
+        try { txOsc.stop(audioContext.currentTime + 0.01); } catch (e) {}
+        try { txOsc.disconnect(); } catch (e) {}
+        State.set('oscillator', null);
+    }
+    if (gainNode && audioContext) {
+        gainNode.gain.cancelScheduledValues(audioContext.currentTime);
+        gainNode.gain.setValueAtTime(gainNode.gain.value, audioContext.currentTime);
+        gainNode.gain.linearRampToValueAtTime(0, audioContext.currentTime + 0.01);
+    }
+    DOM.toggleClass('morseKey', 'key-press', false);
+    const waterfall = State.get('waterfallChart');
+    const start = State.get('transmitStartTime');
+    if (waterfall && start) {
+        waterfall.endSignal(State.get('currentFrequency'), true, false, Date.now() - start);
+    }
+    Network.sendSignal(false);
+    
+    State.set('transmitStartTime', null);
+    const maxTimer = State.get('maxDurationTimer');
+    if (maxTimer) {
+        clearTimeout(maxTimer);
+        State.set('maxDurationTimer', null);
+    }
+    if (isTimeout) {
+        showReminder();
+    } else {
+        State.set('isLongPressBlocked', false);
+    }
+    State.set('isTransmitting', false);
+}
     function showReminder() {
         let reminder = document.getElementById('reminder');
         if (!reminder) {
@@ -298,107 +353,270 @@ const Audio = (() => {
             DOM.toggleClass('audioActivationPrompt', 'hidden', false);
             return;
         }
+        const { audioContext, toneFrequency } = State.getAll();
+        const receivedGain = State.get('receivedGain');
         const signals = State.get('activeRemoteSignals');
-        if (!signals[signalId]) return;
-        if (signals[signalId].oscillator) return;
-        const { audioContext, masterGain, toneFrequency } = State.getAll();
-        const toneOffset = signals[signalId].toneOffset || 0;
+        let toneOffset = 0;
+        if (signals[signalId] && signals[signalId].clientId) {
+            toneOffset = SignalProcessor.getToneOffsetForClient(signals[signalId].clientId);
+        } else if (signals[signalId] && typeof signals[signalId].frequency === 'number') {
+            toneOffset = Math.round((signals[signalId].frequency % 0.1) * 1000);
+        }
         const oscillator = audioContext.createOscillator();
         oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(toneFrequency + toneOffset, audioContext.currentTime);
+        oscillator.frequency.setValueAtTime((toneFrequency || 800) + (toneOffset || 0), audioContext.currentTime);
         const gain = audioContext.createGain();
         const attackTime = 0.01;
         gain.gain.setValueAtTime(0, audioContext.currentTime);
-        gain.gain.linearRampToValueAtTime(State.get('volume') * 0.7, audioContext.currentTime + attackTime);
-        gain.connect(masterGain);
+        gain.gain.linearRampToValueAtTime(0.7, audioContext.currentTime + attackTime);
+        gain.connect(receivedGain);
         oscillator.connect(gain);
         oscillator.start();
+        signals[signalId] = signals[signalId] || {};
         signals[signalId].oscillator = oscillator;
         signals[signalId].gainNode = gain;
         State.set('activeRemoteSignals', signals);
     }
     function stopReceivedTone(signalId) {
-        const signals = State.get('activeRemoteSignals');
-        if (!signals[signalId]) return;
-        const oscillator = signals[signalId].oscillator;
-        const gain = signals[signalId].gainNode;
-        if (oscillator && gain) {
-            const releaseTime = 0.01;
-            gain.gain.setValueAtTime(gain.gain.value, State.get('audioContext').currentTime);
-            gain.gain.linearRampToValueAtTime(0, State.get('audioContext').currentTime + releaseTime);
-            setTimeout(() => {
-                try {
-                    oscillator.stop();
-                    oscillator.disconnect();
-                } catch (error) {}
-                delete signals[signalId].oscillator;
-                delete signals[signalId].gainNode;
-                State.set('activeRemoteSignals', signals);
-            }, releaseTime * 1000);
-        }
+    // 保留一份当前 oscillator/gain 的引用
+    const signals = State.get('activeRemoteSignals');
+    if (!signals[signalId]) return;
+
+    const oscillator = signals[signalId].oscillator;
+    const gain = signals[signalId].gainNode;
+
+    if (oscillator && gain) {
+        const releaseTime = 0.01;
+        const audioContext = State.get('audioContext');
+        gain.gain.setValueAtTime(gain.gain.value, audioContext.currentTime);
+        gain.gain.linearRampToValueAtTime(0, audioContext.currentTime + releaseTime);
+
+        setTimeout(() => {
+            // 释放 oscillator
+            try {
+                oscillator.stop();
+                oscillator.disconnect();
+            } catch (error) {}
+
+            // 重新获取最新状态再修改
+            const currentSignals = State.get('activeRemoteSignals');
+            if (currentSignals[signalId]) {
+                delete currentSignals[signalId].oscillator;
+                delete currentSignals[signalId].gainNode;
+                State.set('activeRemoteSignals', currentSignals);
+            }
+        }, releaseTime * 1000);
     }
-    async function playTimeBroadcastTone(type) {
-        if (!await ensureContext()) {
-            DOM.toggleClass('audioActivationPrompt', 'hidden', false);
+}
+
+async function playTimeBroadcastTone(type) {
+    if (!await ensureContext()) {
+        DOM.toggleClass('audioActivationPrompt', 'hidden', false);
+        return;
+    }
+    const { audioContext, toneFrequency } = State.getAll();
+    const receivedGain = State.get('receivedGain');
+    const oscillator = audioContext.createOscillator();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(toneFrequency + 200, audioContext.currentTime);
+    const gain = audioContext.createGain();
+    const attackTime = 0.01;
+    const releaseTime = 0.01;
+    const duration = (type === 'dot' ? Constants.DOT_DURATION : Constants.DASH_DURATION) / 1000;
+    gain.gain.setValueAtTime(0, audioContext.currentTime);
+    gain.gain.linearRampToValueAtTime(0.8, audioContext.currentTime + attackTime);
+    gain.gain.setValueAtTime(0.8, audioContext.currentTime + attackTime);
+    gain.gain.linearRampToValueAtTime(0, audioContext.currentTime + duration - releaseTime);
+    gain.connect(receivedGain);
+    oscillator.connect(gain);
+    oscillator.start();
+    oscillator.stop(audioContext.currentTime + duration);
+}
+
+async function playTestTone() {
+    if (!await ensureContext()) {
+        DOM.toggleClass('audioActivationPrompt', 'hidden', false);
+        return false;
+    }
+    const { audioContext, masterGain } = State.getAll();
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(1000, audioContext.currentTime);
+    const attackTime = 0.01;
+    const releaseTime = 0.01;
+    const duration = 0.5;
+    gain.gain.setValueAtTime(0, audioContext.currentTime);
+    gain.gain.linearRampToValueAtTime(0.3, audioContext.currentTime + attackTime);
+    gain.gain.setValueAtTime(0.3, audioContext.currentTime + attackTime);
+    gain.gain.linearRampToValueAtTime(0, audioContext.currentTime + duration - releaseTime);
+    oscillator.connect(gain);
+    gain.connect(masterGain);
+    oscillator.start();
+    oscillator.stop(audioContext.currentTime + duration);
+    DOM.toggleClass('audioActivationPrompt', 'hidden', true);
+    return true;
+}
+
+function toggleMute() {
+    const isMuted = !State.get('isMuted');
+    State.set('isMuted', isMuted);
+    const masterGain = State.get('masterGain');
+    if (masterGain) masterGain.gain.value = isMuted ? 0 : 1;
+    const qrmGain = State.get('qrmGain');
+    if (qrmGain) {
+        qrmGain.gain.value = isMuted ? 0 : (State.get('isQrmActive') ? Constants.NOISE.QRM_LEVEL * State.get('volume') : 0);
+    }
+    const btn = DOM.get('muteButton');
+    btn.innerHTML = isMuted ?
+        '<i class="fa fa-volume-off mr-1"></i>静音' :
+        '<i class="fa fa-volume-up mr-1"></i>静音';
+    if (isMuted) stopTransmitting();
+}
+
+function initNoise() {
+    if (!State.get('audioContext')) return;
+    const audioContext = State.get('audioContext');
+    const receivedGain = State.get('receivedGain');
+    // 创建自然噪声生成器 (QRN)
+    const noiseBufferSize = 4096;
+    const noiseGenerator = audioContext.createScriptProcessor(noiseBufferSize, 1, 1);
+    noiseGenerator.onaudioprocess = function(e) {
+        const output = e.outputBuffer.getChannelData(0);
+        for (let i = 0; i < noiseBufferSize; i++) {
+            output[i] = Math.random() * 2 - 1;
+        }
+    };
+    const noiseGain = audioContext.createGain();
+    noiseGain.gain.value = Constants.NOISE.QRN_LEVEL;
+    noiseGenerator.connect(noiseGain);
+    noiseGain.connect(receivedGain);
+    // 创建QRM干扰振荡器
+    const qrmOscillator = audioContext.createOscillator();
+    qrmOscillator.type = 'sine';
+    qrmOscillator.frequency.value = 800;
+    const qrmGain = audioContext.createGain();
+    qrmGain.gain.value = 0; // 初始静音
+    qrmOscillator.connect(qrmGain);
+    qrmGain.connect(receivedGain);
+    qrmOscillator.start();
+    // 保存到状态
+    State.update({ noiseGenerator, noiseGain, qrmOscillator, qrmGain });
+    // 启动QSB信号衰落效果
+    startQSB();
+    // 启动QRM干扰调度
+    scheduleQRM();
+}
+
+function startQSB() {
+    // 停止任何现有QSB间隔
+    if (State.get('qsbInterval')) {
+        clearInterval(State.get('qsbInterval'));
+    }
+    // 创建QSB信号衰落效果
+    const interval = setInterval(() => {
+        const audioContext = State.get('audioContext');
+        if (!audioContext) return;
+        // 使用正弦波生成衰落因子 (1-depth 到 1)
+        const time = audioContext.currentTime;
+        const phase = time * Constants.NOISE.QSB_FREQUENCY;
+        const qsbFactor = 1 - Constants.NOISE.QSB_DEPTH * (1 - Math.sin(phase)) / 2;
+        const receivedGain = State.get('receivedGain');
+        if (receivedGain) {
+            receivedGain.gain.value = State.get('volume') * qsbFactor;
+        }
+        State.set('qsbFactor', qsbFactor);
+    }, 50);
+    State.set('qsbInterval', interval);
+}
+
+function scheduleQRM() {
+    // 清除任何现有QRM间隔
+    if (State.get('qrmInterval')) {
+        clearTimeout(State.get('qrmInterval'));
+    }
+    // 随机生成下一次干扰的时间
+    const nextInterval = Math.random() * (Constants.NOISE.QRM_INTERVAL_MAX - Constants.NOISE.QRM_INTERVAL_MIN) + Constants.NOISE.QRM_INTERVAL_MIN;
+    const intervalId = setTimeout(() => {
+        if (State.get('isMuted')) {
+            scheduleQRM();
             return;
         }
-        const { audioContext, masterGain, toneFrequency } = State.getAll();
-        const oscillator = audioContext.createOscillator();
-        oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(toneFrequency + 200, audioContext.currentTime);
-        const gain = audioContext.createGain();
-        const attackTime = 0.01;
-        const releaseTime = 0.01;
-        const duration = (type === 'dot' ? Constants.DOT_DURATION : Constants.DASH_DURATION) / 1000;
-        gain.gain.setValueAtTime(0, audioContext.currentTime);
-        gain.gain.linearRampToValueAtTime(State.get('volume') * 0.8, audioContext.currentTime + attackTime);
-        gain.gain.setValueAtTime(State.get('volume') * 0.8, audioContext.currentTime + attackTime);
-        gain.gain.linearRampToValueAtTime(0, audioContext.currentTime + duration - releaseTime);
-        gain.connect(masterGain);
-        oscillator.connect(gain);
-        oscillator.start();
-        oscillator.stop(audioContext.currentTime + duration);
+        startQRM();
+        // 随机生成干扰持续时间
+        const duration = Math.random() * (Constants.NOISE.QRM_DURATION_MAX - Constants.NOISE.QRM_DURATION_MIN) + Constants.NOISE.QRM_DURATION_MIN;
+        // 干扰结束后重新调度
+        setTimeout(() => {
+            stopQRM();
+            scheduleQRM();
+        }, duration);
+    }, nextInterval);
+    State.set('qrmInterval', intervalId);
+}
+
+function startQRM() {
+    if (State.get('isQrmActive') || !State.get('qrmGain')) return;
+    const band = Constants.BANDS[State.get('currentBandIndex')];
+    const centerFreq = (band.min + band.max) / 2;
+    // 随机生成干扰频率 (在当前频段内)
+    const freqVariation = (Math.random() * 2 - 1) * Constants.NOISE.QRM_FREQ_VARIANCE;
+    const qrmFreq = Math.max(band.min, Math.min(band.max, centerFreq + freqVariation));
+    State.set('qrmRFfreq', qrmFreq);
+    // 启动干扰
+    const qrmGain = State.get('qrmGain');
+    if (qrmGain) {
+        qrmGain.gain.value = Constants.NOISE.QRM_LEVEL;
     }
-    async function playTestTone() {
-        if (!await ensureContext()) {
-            DOM.toggleClass('audioActivationPrompt', 'hidden', false);
-            return false;
-        }
-        const { audioContext, masterGain } = State.getAll();
-        const oscillator = audioContext.createOscillator();
-        const gain = audioContext.createGain();
-        oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(1000, audioContext.currentTime);
-        const attackTime = 0.01;
-        const releaseTime = 0.01;
-        const duration = 0.5;
-        gain.gain.setValueAtTime(0, audioContext.currentTime);
-        gain.gain.linearRampToValueAtTime(0.3, audioContext.currentTime + attackTime);
-        gain.gain.setValueAtTime(0.3, audioContext.currentTime + attackTime);
-        gain.gain.linearRampToValueAtTime(0, audioContext.currentTime + duration - releaseTime);
-        oscillator.connect(gain);
-        gain.connect(masterGain);
-        oscillator.start();
-        oscillator.stop(audioContext.currentTime + duration);
-        DOM.toggleClass('audioActivationPrompt', 'hidden', true);
-        return true;
+    State.set('isQrmActive', true);
+    updateQrmTone();
+    // 在瀑布图上显示干扰
+    const waterfall = State.get('waterfallChart');
+    if (waterfall) {
+        const qrmId = `qrm-${Date.now()}`;
+        waterfall.startSignal(qrmFreq, false, false, qrmId);
+        // 持续更新干扰在瀑布图上的显示
+        const interval = setInterval(() => {
+            if (!State.get('isQrmActive')) {
+                clearInterval(interval);
+                return;
+            }
+            waterfall.drawContinuousSignal(qrmFreq, false, false);
+        }, Constants.SCROLL_DELAY);
+        // 保存干扰ID和间隔以便后续清理
+        State.set('currentQrmId', qrmId);
+        State.set('currentQrmInterval', interval);
     }
-    function toggleMute() {
-        const isMuted = !State.get('isMuted');
-        State.set('isMuted', isMuted);
-        const masterGain = State.get('masterGain');
-        if (masterGain) masterGain.gain.value = isMuted ? 0 : 1;
-        const btn = DOM.get('muteButton');
-        btn.innerHTML = isMuted ?
-            '<i class="fa fa-volume-off mr-1"></i>静音' :
-            '<i class="fa fa-volume-up mr-1"></i>静音';
-        if (isMuted) stopTransmitting();
+}
+
+function stopQRM() {
+    if (!State.get('isQrmActive') || !State.get('qrmGain')) return;
+    // 停止干扰
+    const qrmGain = State.get('qrmGain');
+    if (qrmGain) {
+        qrmGain.gain.value = 0;
     }
-    return {
-        init, startTransmitting, stopTransmitting,
-        playReceivedTone, stopReceivedTone, playTimeBroadcastTone,
-        playTestTone, toggleMute
-    };
+    State.set('isQrmActive', false);
+    State.set('qrmRFfreq', null);
+    // 清理瀑布图上的干扰显示
+    const waterfall = State.get('waterfallChart');
+    const qrmId = State.get('currentQrmId');
+    const qrmInterval = State.get('currentQrmInterval');
+    if (waterfall && qrmId) {
+        waterfall.endSignal(State.get('qrmRFfreq') || State.get('currentFrequency'), false, false);
+    }
+    if (qrmInterval) {
+        clearInterval(qrmInterval);
+        State.set('currentQrmInterval', null);
+    }
+    State.set('currentQrmId', null);
+}
+
+return {
+    init, startTransmitting, stopTransmitting,
+    playReceivedTone, stopReceivedTone, playTimeBroadcastTone,
+    playTestTone, toggleMute, userGestureResume, updateQrmTone,
+    startQSB, startQRM, stopQRM
+};
 })();
 const Network = (() => {
     function initTxConnection(bandIndex) {
@@ -434,12 +652,17 @@ const Network = (() => {
         State.set('txWs', newTxWs);
     }
     function connectToBand(bandIndex) {
+        // 切换波段时停止QRM
+        if (State.get('isQrmActive')) {
+            Audio.stopQRM();
+        }
         const ws = State.get('ws');
         if (ws) ws.close(1000, '切换波段');
         State.set('currentBandIndex', bandIndex);
         const band = Constants.BANDS[bandIndex];
         let currentFrequency = parseFloat(((band.min + band.max) / 2).toFixed(3));
         State.set('currentFrequency', currentFrequency);
+        Audio.updateQrmTone();
         UI.resetFrequencyKnobRotation();
         UI.updateFrequencyDisplay();
         UI.updateFrequencyIndicatorPosition();
@@ -519,19 +742,19 @@ const Network = (() => {
         newWs.onping = () => State.set('lastActivityTime', Date.now());
         State.set('ws', newWs);
     }
-    function sendSignal() {
+    function sendSignal(isStart) {
         const txWs = State.get('txWs');
         if (!txWs || txWs.readyState !== WebSocket.OPEN) return;
-        const isTransmitting = State.get('isTransmitting');
         const signalData = {
             frequency: State.get('currentFrequency'),
             clientId: State.get('clientId'),
-            type: isTransmitting ? 'start' : 'end',
+            type: isStart ? 'start' : 'end',
             timestamp: Date.now()
         };
-        if (!isTransmitting && State.get('transmitStartTime')) {
+        if (!isStart) {
+            const startTime = State.get('transmitStartTime') || Date.now();
             signalData.endTimestamp = Date.now();
-            signalData.startTimestamp = State.get('transmitStartTime');
+            signalData.startTimestamp = startTime;
             signalData.duration = signalData.endTimestamp - signalData.startTimestamp;
         }
         try {
@@ -554,6 +777,7 @@ const Network = (() => {
     }
     return { connectToBand, sendSignal, cleanupConnections };
 })();
+
 const SignalProcessor = (() => {
     function getToneOffsetForClient(clientId) {
         let hash = 0;
@@ -916,12 +1140,13 @@ const SignalProcessor = (() => {
             }
         });
         const ws = State.get('ws');
-        if (ws && State.get('lastActivityTime') && now - State.get('lastActivityTime') > 300000) {
+        if (ws && State.get('lastActivityTime') && now - State.get('lastActivityTime') > 3600000) { // 改为 1 小时
             ws.close(1000, '长时间无活动');
         }
     }
     return { handleIncomingSignal, cleanupAndCheckTimeouts };
 })();
+
 const Waterfall = (() => {
     function init() {
         const canvas = DOM.get('waterfallCanvas');
@@ -1011,26 +1236,29 @@ const Waterfall = (() => {
                 const range = band.max - band.min;
                 const position = Math.round((frequency - band.min) / range * this.width);
                 if (position < 0 || position >= this.width) return;
+                const row = this.height - 1;
                 const buffer = State.get('signalBuffer');
                 for (let i = 0; i < gapLength; i++) {
-                    const row = Math.max(0, this.height - 1 - i);
-                    if (!isTimeSignal) {
-                        buffer[row][position] = 0;
-                        for (let j = 1; j <= 2; j++) {
-                            if (position - j >= 0) buffer[row][position - j] = 0;
-                            if (position + j < this.width) buffer[row][position + j] = 0;
-                        }
+                    const gapRow = row - i;
+                    if (gapRow < 0) break;
+                    buffer[gapRow][position] = 1;
+                    for (let j = 1; j <= 2; j++) {
+                        if (position - j >= 0) buffer[gapRow][position - j] = 1;
+                        if (position + j < this.width) buffer[gapRow][position + j] = 1;
                     }
-                    this.addDirtyRegion(position - 2, row, 5, 1);
                 }
                 State.set('signalBuffer', buffer);
+                this.addDirtyRegion(position - 2, row - gapLength + 1, 5, gapLength);
             },
             drawContinuousSignal: function(frequency, isLocal = false, isTimeSignal = false) {
                 const band = Constants.BANDS[State.get('currentBandIndex')];
                 const range = band.max - band.min;
                 const position = Math.round((frequency - band.min) / range * this.width);
                 if (position < 0 || position >= this.width) return;
-                const strength = isTimeSignal ? 4 : (isLocal ? 3 : 2);
+                // 应用QSB信号衰落因子到信号强度
+                const qsbFactor = State.get('qsbFactor') || 1;
+                let strength = isTimeSignal ? 4 : (isLocal ? 3 : 2);
+                strength = Math.max(1, Math.round(strength * qsbFactor));
                 const row = this.height - 1;
                 const buffer = State.get('signalBuffer');
                 buffer[row][position] = strength;
@@ -1085,7 +1313,7 @@ const Waterfall = (() => {
                         buffer[currentRow][signal.position] = signal.isTimeSignal ? 4 : (signal.isLocal ? 3 : 2);
                         for (let j = 1; j <= signal.spread; j++) {
                             if (signal.position - j >= 0) buffer[currentRow][signal.position - j] = signal.isTimeSignal ? 4 : (signal.isLocal ? 3 : 2);
-                            if (signal.position + j < this.width) buffer[currentRow][signal.position + j] = signal.isTimeSignal ? 4 : (signal.isLocal ? 3 : 2);
+                            if (signal.position + j < this.width) buffer[currentRow][signal.position + j] = signal.isTimeSignal ? 4 : (isLocal ? 3 : 2);
                         }
                         State.set('signalBuffer', buffer);
                         signal.lastDrawnRow = currentRow;
@@ -1158,6 +1386,7 @@ const Waterfall = (() => {
     }
     return { init };
 })();
+
 const UI = (() => {
     function updateConnectionStatus(message, className = 'status-disconnected') {
         const el = DOM.get('connectionStatus');
@@ -1359,15 +1588,18 @@ const UI = (() => {
             if (foundSignal) {
                 State.set('currentBandIndex', foundSignal.bandIndex);
                 State.set('currentFrequency', foundSignal.frequency);
+                Audio.updateQrmTone();
                 updateFrequencyDisplay();
                 updateFrequencyIndicatorPosition();
                 resetFrequencyKnobRotation();
                 updateSearchStatus(`已切换到 ${Constants.BANDS[foundSignal.bandIndex].name} 的信号频率`);
+                Network.connectToBand(foundSignal.bandIndex);
             } else {
                 const prevBandIndex = State.get('previousBandIndex');
                 const prevFrequency = State.get('previousFrequency');
                 State.set('currentBandIndex', prevBandIndex);
                 State.set('currentFrequency', prevFrequency);
+                Audio.updateQrmTone();
                 updateFrequencyDisplay();
                 updateFrequencyIndicatorPosition();
                 resetFrequencyKnobRotation();
@@ -1421,6 +1653,7 @@ const UI = (() => {
         if (now - State.get('lastFrequencyUpdate') > Constants.FREQUENCY_UPDATE_THROTTLE ||
             Math.abs(newFrequency - State.get('currentFrequency')) > 0.002) {
             State.set('currentFrequency', newFrequency);
+            Audio.updateQrmTone();
             updateFrequencyDisplay();
             State.set('lastFrequencyUpdate', now);
         }
@@ -1450,6 +1683,7 @@ const UI = (() => {
         const volume = normalizedRotation / 360;
         State.set('volume', volume);
         const gainNode = State.get('gainNode');
+        const receivedGain = State.get('receivedGain');
         const audioContext = State.get('audioContext');
         if (gainNode && audioContext) {
             if (State.get('isTransmitting')) {
@@ -1457,6 +1691,9 @@ const UI = (() => {
             } else {
                 gainNode.gain.value = 0;
             }
+        }
+        if (receivedGain) {
+            receivedGain.gain.value = volume * State.get('qsbFactor');
         }
         updateVolumeDisplay();
         State.set('startAngle', currentAngle);
@@ -1488,6 +1725,7 @@ const UI = (() => {
         if (oscillator && audioContext) {
             oscillator.frequency.linearRampToValueAtTime(State.get('toneFrequency'), audioContext.currentTime + 0.01);
         }
+        Audio.updateQrmTone();
         updateToneDisplay();
         State.set('startAngle', currentAngle);
     }
@@ -1669,6 +1907,7 @@ const UI = (() => {
                 const newFrequency = parseFloat((band.min + (adjustedPercentage * range)).toFixed(3));
         
                 State.set('currentFrequency', newFrequency);
+                Audio.updateQrmTone();
                 updateFrequencyDisplay();
                 updateFrequencyIndicatorPosition();
                 resetFrequencyKnobRotation();
@@ -1688,118 +1927,189 @@ const UI = (() => {
         const morseKey = DOM.get('morseKey');
         if (morseKey) {
             morseKey.addEventListener('contextmenu', (e) => { e.preventDefault(); });
-            morseKey.addEventListener('mousedown', (e) => {
-                if (State.get('isMuted') || State.get('isSearching')) return;
+            morseKey.addEventListener('mousedown', async (e) => {
+                await Audio.userGestureResume();
+                State.set('pendingRelease', false);
                 if (State.get('isManualMode')) {
-                    Audio.startTransmitting();
-                    return;
-                }
-                if (e.button === 0) {
-                    Keyer.setPaddle('dot', true);
-                } else if (e.button === 2) {
-                    Keyer.setPaddle('dash', true);
+                    if (!State.get('isMuted') && !State.get('isSearching') && !State.get('isTransmitting')) {
+                        await Audio.startTransmitting();
+                    }
+                } else {
+                    if (e.button === 0) {
+                        Keyer.setPaddle('dot', true);
+                    } else if (e.button === 2) {
+                        Keyer.setPaddle('dash', true);
+                    }
                 }
             });
-    
-            morseKey.addEventListener('mouseup', (e) => {
-                if (State.get('isManualMode')) {
-                    if (State.get('isTransmitting')) Audio.stopTransmitting();
-                    State.set('isLongPressBlocked', false); 
+            morseKey.addEventListener('mouseup', async (e) => {
+                // 统一首次交互兜底
+                if (!State.get('audioContext') || State.get('audioContext').state === 'suspended') {
+                    State.set('pendingRelease', true);
+                    await Audio.userGestureResume();
+                }
+                if (State.get('pendingRelease')) {
+                    State.set('pendingRelease', false);
+                    if (State.get('isManualMode')) {
+                        Audio.stopTransmitting();
+                        State.set('isLongPressBlocked', false);
+                    }
                     return;
                 }
-                if (e.button === 0) {
-                    Keyer.setPaddle('dot', false);
-                } else if (e.button === 2) {
-                    Keyer.setPaddle('dash', false);
+                if (State.get('isManualMode')) {
+                    Audio.stopTransmitting();
+                    State.set('isLongPressBlocked', false);
+                } else {
+                    if (e.button === 0) {
+                        Keyer.setPaddle('dot', false);
+                    } else if (e.button === 2) {
+                        Keyer.setPaddle('dash', false);
+                    }
                 }
             });
-    
-            morseKey.addEventListener('mouseleave', () => {
-                if (State.get('isTransmitting')) {
+            morseKey.addEventListener('mouseleave', async () => {
+                if (!State.get('audioContext') || State.get('audioContext').state === 'suspended') {
+                    State.set('pendingRelease', true);
+                    await Audio.userGestureResume();
+                }
+                if (State.get('pendingRelease')) {
+                    State.set('pendingRelease', false);
+                    if (State.get('isManualMode')) {
+                        Audio.stopTransmitting();
+                    }
+                    return;
+                }
+                if (State.get('isManualMode')) {
                     Audio.stopTransmitting();
                 }
             });
-            morseKey.addEventListener('touchstart', (e) => {
+            morseKey.addEventListener('touchstart', async (e) => {
                 e.preventDefault();
-                if (State.get('isMuted') || State.get('isSearching')) return;
+                await Audio.userGestureResume();
+                State.set('pendingRelease', false);
                 if (State.get('isManualMode')) {
-                    Audio.startTransmitting();
+                    if (!State.get('isMuted') && !State.get('isSearching') && !State.get('isTransmitting')) {
+                        await Audio.startTransmitting();
+                    }
                 } else {
                     Keyer.setPaddle('dot', true);
                 }
             }, { passive: false });
-     
-            morseKey.addEventListener('touchend', (e) => {
+            morseKey.addEventListener('touchend', async (e) => {
                 e.preventDefault();
+                if (!State.get('audioContext') || State.get('audioContext').state === 'suspended') {
+                    State.set('pendingRelease', true);
+                    await Audio.userGestureResume();
+                }
+                if (State.get('pendingRelease')) {
+                    State.set('pendingRelease', false);
+                    if (State.get('isManualMode')) {
+                        Audio.stopTransmitting();
+                        State.set('isLongPressBlocked', false);
+                    }
+                    return;
+                }
                 if (State.get('isManualMode')) {
-                    if (State.get('isTransmitting')) Audio.stopTransmitting();
+                    Audio.stopTransmitting();
                     State.set('isLongPressBlocked', false);
                 } else {
                     Keyer.setPaddle('dot', false);
                 }
             }, { passive: false });
-     
-            morseKey.addEventListener('touchcancel', (e) => {
+            morseKey.addEventListener('touchcancel', async (e) => {
                 e.preventDefault();
-                if (State.get('isTransmitting')) {
+                if (!State.get('audioContext') || State.get('audioContext').state === 'suspended') {
+                    State.set('pendingRelease', true);
+                    await Audio.userGestureResume();
+                }
+                if (State.get('pendingRelease')) {
+                    State.set('pendingRelease', false);
+                    if (State.get('isManualMode')) {
+                        Audio.stopTransmitting();
+                    }
+                    return;
+                }
+                if (State.get('isManualMode')) {
                     Audio.stopTransmitting();
                 }
             }, { passive: false });
         }
  
-        document.addEventListener('keydown', (e) => {
-            if (e.code === 'Space' && State.get('isManualMode') && !State.get('isMuted') && !State.get('isSearching') && !State.get('isTransmitting')) {
+        document.addEventListener('keydown', async (e) => {
+            if (e.code === 'Space' && State.get('isManualMode')) {
                 e.preventDefault();
-                Audio.startTransmitting();
+                await Audio.userGestureResume();
+                State.set('pendingRelease', false);
+                if (!State.get('isMuted') && !State.get('isSearching') && !State.get('isTransmitting')) {
+                    await Audio.startTransmitting();
+                }
             }
             if (!State.get('isManualMode')) {
                 if (e.key === ',') {
                     e.preventDefault();
+                    await Audio.userGestureResume();
                     Keyer.setPaddle('dot', true);
                 } else if (e.key === '.') {
                     e.preventDefault();
+                    await Audio.userGestureResume();
                     Keyer.setPaddle('dash', true);
                 } else if (e.code === 'ArrowLeft') {
                     e.preventDefault();
+                    await Audio.userGestureResume();
                     Keyer.setPaddle('dot', true);
                 } else if (e.code === 'ArrowRight') {
                     e.preventDefault();
+                    await Audio.userGestureResume();
                     Keyer.setPaddle('dash', true);
                 }
             }
-    
             if (e.code === 'KeyT' && Constants.BANDS[State.get('currentBandIndex')].name === Constants.TIME_BROADCAST_BAND && !State.get('isTransmitting')) {
                 e.preventDefault();
+                await Audio.userGestureResume();
                 State.set('currentFrequency', Constants.TIME_BROADCAST_FREQUENCY);
+                Audio.updateQrmTone();
                 updateFrequencyDisplay();
                 updateFrequencyIndicatorPosition();
                 resetFrequencyKnobRotation();
             }
-    
             if (e.code === 'KeyA') {
                 e.preventDefault();
+                await Audio.userGestureResume();
                 Audio.playTestTone();
             }
         });
- 
-        document.addEventListener('keyup', (e) => {
+        document.addEventListener('keyup', async (e) => {
             if (e.code === 'Space' && State.get('isManualMode')) {
                 e.preventDefault();
-                if (State.get('isTransmitting')) Audio.stopTransmitting();
+                if (!State.get('audioContext') || State.get('audioContext').state === 'suspended') {
+                    State.set('pendingRelease', true);
+                    await Audio.userGestureResume();
+                }
+                if (State.get('pendingRelease')) {
+                    State.set('pendingRelease', false);
+                    Audio.stopTransmitting();
+                    State.set('isLongPressBlocked', false);
+                    return;
+                }
+                Audio.stopTransmitting();
                 State.set('isLongPressBlocked', false);
             }
             if (!State.get('isManualMode')) {
                 if (e.key === ',') {
                     e.preventDefault();
+                    await Audio.userGestureResume();
                     Keyer.setPaddle('dot', false);
                 } else if (e.key === '.') {
                     e.preventDefault();
+                    await Audio.userGestureResume();
                     Keyer.setPaddle('dash', false);
                 } else if (e.code === 'ArrowLeft') {
                     e.preventDefault();
+                    await Audio.userGestureResume();
                     Keyer.setPaddle('dot', false);
                 } else if (e.code === 'ArrowRight') {
                     e.preventDefault();
+                    await Audio.userGestureResume();
                     Keyer.setPaddle('dash', false);
                 }
             }
@@ -1953,31 +2263,140 @@ const UI = (() => {
                 }, { passive: false });
             }
         }
+        // 添加噪声控制UI元素
+        createNoiseControls();
+    }
+    function createNoiseControls() {
+    // 创建噪声控制容器
+    const container = document.createElement('div');
+    container.className = 'noise-controls';
+    
+    // 创建QRN控制行
+    const qrnRow = document.createElement('div');
+    qrnRow.className = 'control-row';
+    
+    const qrnLabel = document.createElement('label');
+    qrnLabel.textContent = '自然噪声 (QRN): ';
+    
+    const qrnSlider = document.createElement('input');
+    qrnSlider.type = 'range';
+    qrnSlider.min = '0';
+    qrnSlider.max = '1';
+    qrnSlider.step = '0.01';
+    qrnSlider.value = Constants.NOISE.QRN_LEVEL;
+    qrnSlider.oninput = function() {
+        Constants.NOISE.QRN_LEVEL = parseFloat(this.value);
+        const noiseGain = State.get('noiseGain');
+        if (noiseGain) {
+            noiseGain.gain.value = Constants.NOISE.QRN_LEVEL;
+        }
+    };
+    
+    qrnRow.appendChild(qrnLabel);
+    qrnRow.appendChild(qrnSlider);
+    
+    // 创建QRM控制行
+    const qrmRow = document.createElement('div');
+    qrmRow.className = 'control-row';
+    
+    const qrmLabel = document.createElement('label');
+    qrmLabel.textContent = '人为干扰 (QRM): ';
+    
+    const qrmSlider = document.createElement('input');
+    qrmSlider.type = 'range';
+    qrmSlider.min = '0';
+    qrmSlider.max = '1';
+    qrmSlider.step = '0.01';
+    qrmSlider.value = Constants.NOISE.QRM_LEVEL;
+    qrmSlider.oninput = function() {
+        Constants.NOISE.QRM_LEVEL = parseFloat(this.value);
+        const qrmGain = State.get('qrmGain');
+        if (qrmGain && State.get('isQrmActive')) {
+            qrmGain.gain.value = Constants.NOISE.QRM_LEVEL;
+        }
+    };
+    
+    qrmRow.appendChild(qrmLabel);
+    qrmRow.appendChild(qrmSlider);
+    
+    // 创建QSB控制行
+    const qsbRow = document.createElement('div');
+    qsbRow.className = 'control-row';
+    
+    const qsbLabel = document.createElement('label');
+    qsbLabel.textContent = '信号衰落 (QSB): ';
+    
+    const qsbSlider = document.createElement('input');
+    qsbSlider.type = 'range';
+    qsbSlider.min = '0';
+    qsbSlider.max = '1';
+    qsbSlider.step = '0.01';
+    qsbSlider.value = Constants.NOISE.QSB_DEPTH;
+    qsbSlider.oninput = function() {
+        Constants.NOISE.QSB_DEPTH = parseFloat(this.value);
+    };
+    
+    qsbRow.appendChild(qsbLabel);
+    qsbRow.appendChild(qsbSlider);
+    
+    // 添加到容器
+    container.appendChild(qrnRow);
+    container.appendChild(qrmRow);
+    container.appendChild(qsbRow);
+    
+    // 添加到左侧控制区
+    const leftControls = document.querySelector('.control-section.left-controls');
+    if (leftControls) {
+        leftControls.appendChild(container);
+    } else {
+        document.body.appendChild(container);
+    }
+}
+    function showReminderModal() {
+        const modal = DOM.get('reminderModal');
+        if (modal) {
+            modal.classList.add('show');
+        }
+    }
+    function hideReminderModal() {
+        const modal = DOM.get('reminderModal');
+        if (modal) {
+            modal.classList.remove('show');
+            localStorage.setItem('cw_reminder_shown', '1');
+        }
     }
     return {
         updateConnectionStatus, populateBandSelect, resetFrequencyKnobRotation,
         createWaterfallMarkers, updateFrequencyIndicatorPosition,
         resetWaterfallPosition, createFrequencyScale, updateFrequencyDisplay,
         updateToneDisplay, updateVolumeDisplay, setupEventListeners,
-        updateSearchStatus, updateSearchProgress, continueSearch, completeSearch
+        updateSearchStatus, updateSearchProgress, continueSearch, completeSearch,
+        showReminderModal, hideReminderModal
     };
 })();
+
 function init() {
     State.init();
- 
     UI.populateBandSelect();
     UI.setupEventListeners();
     Keyer.init();
- 
     Waterfall.init();
- 
     Audio.init();
- 
     Network.connectToBand(State.get('currentBandIndex'));
- 
     setInterval(SignalProcessor.cleanupAndCheckTimeouts, 1000);
+
+    // 每次都弹出提醒模态框，强制用户交互
+    UI.showReminderModal();
+    const rogerBtn = DOM.get('rogerButton');
+    if (rogerBtn) {
+        rogerBtn.onclick = async () => {
+            await Audio.userGestureResume();
+            UI.hideReminderModal();
+        };
+    }
 }
 window.addEventListener('load', init);
+
 const Keyer = (() => {
     function msPerDit() {
         const wpm = State.get('wpm') || 20;
@@ -2029,6 +2448,10 @@ const Keyer = (() => {
         }
         if (!State.get('isManualMode')) {
             start();
+        }
+        // 修复首次拍发持续发声问题
+        if (!pressed && State.get('isManualMode')) {
+            Audio.stopTransmitting();
         }
     }
     function start() {
