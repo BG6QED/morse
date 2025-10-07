@@ -45,15 +45,15 @@ const Constants = {
     },
 
     NOISE: {
-        QRN_LEVEL: 0.1, // 自然噪声基础水平 (0-1)
-        QRM_LEVEL: 0.2, // 人为干扰基础水平 (0-1)
-        QSB_FREQUENCY: 0.01, // 信号衰落频率 (Hz)
-        QSB_DEPTH: 0.5, // 信号衰落深度 (0-1)
-        QRM_INTERVAL_MIN: 2000, // 最小干扰间隔 (ms)
-        QRM_INTERVAL_MAX: 8000, // 最大干扰间隔 (ms)
-        QRM_DURATION_MIN: 500, // 最小干扰持续时间 (ms)
-        QRM_DURATION_MAX: 3000, // 最大干扰持续时间 (ms)
-        QRM_FREQ_VARIANCE: 0.02 // 干扰频率变化范围 (MHz)
+        QRN_LEVEL: 0.2,
+        QRM_LEVEL: 0.1,
+        QSB_FREQUENCY: 0.1,
+        QSB_DEPTH: 0.5,
+        QRM_INTERVAL_MIN: 2000,
+        QRM_INTERVAL_MAX: 8000,
+        QRM_DURATION_MIN: 500,
+        QRM_DURATION_MAX: 3000,
+        QRM_FREQ_VARIANCE: 0.059
     }
 };
 
@@ -209,7 +209,6 @@ const Audio = (() => {
             State.update({
                 audioContext, masterGain, gainNode, receivedGain, oscillator: null
             });
-            // 初始化噪声和干扰系统
             initNoise();
             return true;
         } catch (error) { return false; }
@@ -233,7 +232,7 @@ const Audio = (() => {
     function updateQrmTone() {
         if (!State.get('isQrmActive') || !State.get('qrmOscillator') || State.get('qrmRFfreq') === null) return;
         const diff = State.get('qrmRFfreq') - State.get('currentFrequency');
-        const beat = diff * 1000000; // 1 Hz RF diff = 1 Hz audio beat
+        const beat = diff * 1000000;
         const qrmOsc = State.get('qrmOscillator');
         qrmOsc.frequency.value = State.get('toneFrequency') + beat;
     }
@@ -264,7 +263,7 @@ const Audio = (() => {
         if (waterfall) {
             waterfall.startSignal(State.get('currentFrequency'), true, false);
         }
-        Network.sendSignal(true); // 发送 start 信号
+        Network.sendSignal(true);
         if (!State.get('transmitInterval')) {
             const interval = setInterval(() => {
                 const waterfall = State.get('waterfallChart');
@@ -378,7 +377,6 @@ const Audio = (() => {
         State.set('activeRemoteSignals', signals);
     }
     function stopReceivedTone(signalId) {
-    // 保留一份当前 oscillator/gain 的引用
     const signals = State.get('activeRemoteSignals');
     if (!signals[signalId]) return;
 
@@ -569,6 +567,7 @@ function startQRM() {
     }
     State.set('isQrmActive', true);
     updateQrmTone();
+    /*
     // 在瀑布图上显示干扰
     const waterfall = State.get('waterfallChart');
     if (waterfall) {
@@ -585,7 +584,8 @@ function startQRM() {
         // 保存干扰ID和间隔以便后续清理
         State.set('currentQrmId', qrmId);
         State.set('currentQrmInterval', interval);
-    }
+    } 
+    */
 }
 
 function stopQRM() {
@@ -597,6 +597,7 @@ function stopQRM() {
     }
     State.set('isQrmActive', false);
     State.set('qrmRFfreq', null);
+    /*
     // 清理瀑布图上的干扰显示
     const waterfall = State.get('waterfallChart');
     const qrmId = State.get('currentQrmId');
@@ -609,6 +610,7 @@ function stopQRM() {
         State.set('currentQrmInterval', null);
     }
     State.set('currentQrmId', null);
+    */
 }
 
 return {
@@ -652,7 +654,6 @@ const Network = (() => {
         State.set('txWs', newTxWs);
     }
     function connectToBand(bandIndex) {
-        // 切换波段时停止QRM
         if (State.get('isQrmActive')) {
             Audio.stopQRM();
         }
@@ -2263,15 +2264,11 @@ const UI = (() => {
                 }, { passive: false });
             }
         }
-        // 添加噪声控制UI元素
         createNoiseControls();
     }
     function createNoiseControls() {
-    // 创建噪声控制容器
     const container = document.createElement('div');
     container.className = 'noise-controls';
-    
-    // 创建QRN控制行
     const qrnRow = document.createElement('div');
     qrnRow.className = 'control-row';
     
@@ -2294,8 +2291,6 @@ const UI = (() => {
     
     qrnRow.appendChild(qrnLabel);
     qrnRow.appendChild(qrnSlider);
-    
-    // 创建QRM控制行
     const qrmRow = document.createElement('div');
     qrmRow.className = 'control-row';
     
@@ -2318,8 +2313,6 @@ const UI = (() => {
     
     qrmRow.appendChild(qrmLabel);
     qrmRow.appendChild(qrmSlider);
-    
-    // 创建QSB控制行
     const qsbRow = document.createElement('div');
     qsbRow.className = 'control-row';
     
@@ -2338,13 +2331,9 @@ const UI = (() => {
     
     qsbRow.appendChild(qsbLabel);
     qsbRow.appendChild(qsbSlider);
-    
-    // 添加到容器
     container.appendChild(qrnRow);
     container.appendChild(qrmRow);
     container.appendChild(qsbRow);
-    
-    // 添加到左侧控制区
     const leftControls = document.querySelector('.control-section.left-controls');
     if (leftControls) {
         leftControls.appendChild(container);
@@ -2449,7 +2438,6 @@ const Keyer = (() => {
         if (!State.get('isManualMode')) {
             start();
         }
-        // 修复首次拍发持续发声问题
         if (!pressed && State.get('isManualMode')) {
             Audio.stopTransmitting();
         }
