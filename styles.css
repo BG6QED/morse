@@ -131,7 +131,7 @@ body {
     height: 100%;
     background-color: var(--glow-red);
     box-shadow: 0 0 5px var(--glow-red), 0 0 10px var(--glow-red);
-    opacity: 0.3; /* 降低透明度，使信号线更显眼 */
+    opacity: 0.3;
     z-index: 5;
     transform: translateX(-50%);
 }
@@ -258,7 +258,6 @@ body {
     margin-bottom: 15px;
 }
 
-/* 旋钮大小设置 - 增大所有旋钮尺寸 */
 .large-knob {
     width: 180px;
     height: 180px;
@@ -368,7 +367,7 @@ body {
     border-radius: 50% 50% 65% 65% / 85% 85% 70% 70%;
     box-shadow: inset 0 2px 4px rgba(255,255,255,0.06), 0 4px 10px rgba(0,0,0,0.5);
     transition: transform 120ms ease;
-    transform-origin: 50% 0%; /* 顶部为旋转中心 */
+    transform-origin: 50% 0%; 
 }
 .paddles .paddle.left::after { left: 1%; right: auto; transform: rotate(2deg); }
 .paddles .paddle.right::after { right: 1%; left: auto; transform: rotate(-2deg); }
@@ -459,7 +458,6 @@ body {
     background-color: #3b82f6;
 }
 
-/* 静音按钮特殊样式 */
 .mute-button {
     margin-top: 10px;
     width: 100px;
@@ -581,7 +579,7 @@ input:checked + .slider:before {
 
 /* 噪声控制滑块样式 */
 .noise-controls {
-    background-color: var(--panel-bg); /* 使用面板统一背景色 */
+    background-color: var(--panel-bg);
     padding: 15px;
     border-radius: 6px;
     border: 1px solid var(--border-color);
@@ -598,11 +596,11 @@ input:checked + .slider:before {
 .noise-controls label {
     color: var(--accent-color);
     font-size: 0.9rem;
-    width: 120px; /* 固定标签宽度 */
+    width: 120px;
 }
 
 .noise-controls input[type="range"] {
-    flex: 1; /* 自适应剩余宽度 */
+    flex: 1;
     height: 6px;
     -webkit-appearance: none;
     appearance: none;
@@ -633,7 +631,7 @@ input:checked + .slider:before {
     border: 1px solid var(--knob-border);
     box-shadow: 0 0 3px rgba(0, 0, 0, 0.3);
 }
-/* 进度条 */
+
 .progress-bar {
     height: 8px;
     background-color: var(--slider-track);
@@ -677,18 +675,17 @@ input:checked + .slider:before {
     .control-section {
         width: 100%;
     }
-    
-    /* Reorder control sections for small screens */
+  
     .control-section.key-section {
-        order: 1; /* Morse key and mode toggle at the top */
+        order: 1;
     }
     
     .control-section.frequency-section {
-        order: 2; /* Frequency knob below morse key */
+        order: 2;
     }
     
     .control-section.knobs-section {
-        order: 3; /* Volume and tone knobs at the bottom */
+        order: 3;
     }
     
     .knob-controls-row {
@@ -713,8 +710,6 @@ input:checked + .slider:before {
     #frequencyDigits {
         font-size: 1.5rem;
     }
-    
-    /* 响应式调整旋钮大小 */
     .large-knob {
         width: 150px;
         height: 150px;
